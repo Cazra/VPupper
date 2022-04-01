@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./camera_utils.min.js"></script>
+  <script src="./control_utils.min.js"></script>
+  <script src="./drawing_utils.min.js"></script>
+  <script src="./underscore.min.js"></script>
+  <script src="./glMatrix.min.js"></script>
+  <script src="./holistic.min.js"></script>
+  <script type="module">
+    const videoElement = document.getElementsByClassName('input_video')[0];
+    const canvasElement = document.getElementsByClassName('output_canvas')[0];
+    const canvasCtx = canvasElement.getContext('2d');
+    const vec4 = glMatrix.vec4;
+    const vec3 = glMatrix.vec3;
+    const mat4 = glMatrix.mat4;
+
+    // Keep track of the last set of results for debugging.
+    var lastResults;
+
+    // Indices for important face landmarks, reverse engineered from MediaPipe's `holistic.js` code.
+    // Not sure why they don't bother to document any of this! >:(
+    // A full diagram of the indices on the mesh can be found in the Tensor Flow docs: https://github.com/tensorflow/tfjs-models/blob/master/face-landmarks-detection/mesh_map.jpg
+    const INDS_EYE_LEFT = [263, 249, 390, 373, 374, 380, 381, 382, 362, 466, 388, 387, 386, 385, 384, 398];
+    const INDS_EYE_RIGHT = [33, 7, 163, 144, 145, 153, 154, 155, 133, 246, 161, 160, 159, 158, 157, 173];
+
+    const INDS_IRIS_RIGHT = _.range(468, 473);
+    const INDS_IRIS_LEFT = _.range(473, 478);
+
+    const INDS_LIPS = [61,146,91,181,84,17,314,405,321,375,291,185,40,39,37,0,267,269,270,409,78,95,88,178,87,14,317,402,318,324,308,191,80,81,82,13,312,311,310,415];
+
+    // Indices for important pose landmarks. (Taken from Fig 4 in MediaPipe's pose docs)
+    const IND_SHOULDER_RIGHT = 12;
+    const IND_ELBOW_RIGHT = 14;
+    const IND_WRIST_RIGHT = 16;
+    const IND_INDEX_RIGHT = 20;
+    const IND_PINKY_RIGHT = 18;
+
+    const IND_SHOULDER_LEFT = 11;
+    const IND_ELBOW_LEFT = 13;
+    const IND_WRIST_LEFT = 15;
+    const IND_INDEX_LEFT = 19;
+    const IND_PINKY_LEFT = 17;
+
+    const IND_EAR_LEFT = 7;
+    const IND_EAR_RIGHT = 8;
+
+    // Indices for important face landmarks.
+    const IND_EYE_RIGHT_TOP = 159;
+    const IND_EYE_RIGHT_BOTTOM = 145;
+    const IND_EYE_RIGHT_INNER = 133;
+    const IND_EYE_RIGHT_OUTER = 33;
+
+    const IND_EYE_LEFT_TOP = 386;
+    const IND_EYE_LEFT_BOTTOM = 374;
+    const IND_EYE_LEFT_OUTER = 263;
+    const IND_EYE_LEFT_INNER = 362;
+
+    const IND_MOUTH_LEFT = 308;
+    const IND_MOUTH_RIGHT = 78;
+    const IND_MOUTH_TOP = 13;
+    const IND_MOUTH_BOTTOM = 14;
+
+    // Indices for cardinal landmarks on the face.
+    const IND_FACE_RIGHT = 234;
+    const IND_FACE_LEFT = 454;
+    const IND_FACE_TOP = 10;
+    const IND_FACE_BOTTOM = 152;
+    const IND_FACE_NOSE = 1;
+
+    // Indices for important hand landmarks.
+    const IND_HAND_WRIST = 0;
+    const IND_HAND_THUMB_BASE = 2;
+    const IND_HAND_THUMB_START = 3;
+    const IND_HAND_THUMB_END = 4;
+    const IND_HAND_INDEX_BASE = 5;
+    const IND_HAND_INDEX_START = 7;
+    const IND_HAND_INDEX_END = 8;
+    const IND_HAND_MIDDLE_BASE = 9;
+    const IND_HAND_MIDDLE_START = 11;
+    const IND_HAND_MIDDLE_END = 12;
+    const IND_HAND_RING_START = 15;
+    const IND_HAND_RING_END = 16;
+    const IND_HAND_PINKY_BASE = 17;
+    const IND_HAND_PINKY_START = 19;
+    const IND_HAND_PINKY_END = 20;
+
+    /**
+     * Flip the given landmark's X coordinate.
+     * @param {Landmark} lm
+     */
+    function flipLandmark(lm) {
+      lm.x = 1.0 - lm.x;
+    }
+
+    /**
+     * Convert a MediaPipe landmark to a homogeneous 3D point.
+     * @param {Landmark} lm
+     * @return {vec4}
+     */
+    function landmark2pt(lm) {
+      return [lm.x, lm.y, lm.z, 1.0];
+    }
+
+    /**
+     * Get the average of a list of points. (sort of like a center of mass)
+     * @param {vec4[]}
+     * @return vec4
+     */
+    function avgPt(pts) {
+      return _.chain(pts)
+      .reduce((memo, pt) => {
+        return vec4.add([], memo, pt);
+      }, [0, 0, 0, 0])
+      .map(coord => {
+        return coord / pts.length;
+      })
+      .value();
+    }
+
+    /**
+     * Get the angle of a vector around the Z axis, in degrees.
+     * @param {vec3} u
+     * @return {number}
+     */
+    function vecAngle(u) {
+      return Math.atan2(u[1], u[0]) * 360.0 / (2*Math.PI);
+    }
+
+    /**
+     * Draw a normalized point.
+     * @param {vec4} pt
+     * @param {string} color
+     * @param {number} radius
+     */
+    function drawPt(pt, color, radius = 4) {
+      canvasCtx.fillStyle = color;
+      canvasCtx.beginPath();
+      canvasCtx.ellipse(pt[0] * canvasElement.width, pt[1] * canvasElement.height, radius, radius, 0, 0, Math.PI * 2);
+      canvasCtx.fill();
+    }
+
+    /**
+     * Draw a line between two normalized points.
+     * @param {vec4} p1
+     * @param {vec4} p2
+     * @param {string} color
+     * @param {uint} thickness
+     */
+    function drawLine(p1, p2, color, thickness = 2) {
+      canvasCtx.strokeStyle = color;
+      canvasCtx.lineWidth = thickness;
+      canvasCtx.beginPath();
+      canvasCtx.moveTo(p1[0] * canvasElement.width, p1[1] * canvasElement.height);
+      canvasCtx.lineTo(p2[0] * canvasElement.width, p2[1] * canvasElement.height);
+      canvasCtx.stroke();
+    }
+
+    /**
+     * Get the look vector and up vector for our face from the holistic results.
+     * @param {HolisticResults} results
+     * @return {LookMetrics}
+     */
+    function getFaceOrientation(results) {
+      // draw points for face's cardinal vertices.
+      let lmFLeft = results.faceLandmarks[IND_FACE_LEFT];
+      let lmFRight = results.faceLandmarks[IND_FACE_RIGHT];
+      let lmFTop = results.faceLandmarks[IND_FACE_TOP];
+      let lmFBottom = results.faceLandmarks[IND_FACE_BOTTOM];
+      let lmFNose = results.faceLandmarks[IND_FACE_NOSE];
+
+      let ptFLeft = landmark2pt(lmFLeft);
+      let ptFRight = landmark2pt(lmFRight);
+      let ptFTop = landmark2pt(lmFTop);
+      let ptFBottom = landmark2pt(lmFBottom);
+      let ptFNose = landmark2pt(lmFNose);
+
+      drawPt(ptFLeft, '#008888', 2);
+      drawPt(ptFRight, '#FF8888', 2);
+      drawPt(ptFTop, '#880088', 2);
+      drawPt(ptFBottom, '#88FF88', 2);
+      drawPt(ptFNose, '#8888FF', 2);
+
+      // Compute the normalized up and right vectors.
+      let up = vec3.normalize([], vec3.sub([], ptFTop, ptFBottom));
+      let right = vec3.normalize([], vec3.sub([], ptFRight, ptFLeft));
+
+      // Compute and visualize the look vector for the face.
+      let look = vec3.normalize([], vec3.cross([], right, up));
+      let ptLook = vec4.transformMat4([], ptFNose, mat4.fromTranslation([], look));
+      drawPt(ptLook, '#8888FF', 4);
+
+      return {look, up, right};
+    }
+
+    // enumerations for the types of eyes.
+    const EYE_TYPE_LEFT = 0;
+    const EYE_TYPE_RIGHT = 1;
+
+    /**
+     * Get eye metrics useful for puppeteering our VTuber avatar, such as how
+     * open the eyes are, their expression, and the position of the irises
+     * relative to the eyes.
+     * @param {HolisticResults} results
+     * @param {LookMetrics} orientation The orientation results for the face.
+     * @return {EyesMetrics}
+     */
+    function getEyeMetrics(results, orientation) {
+      return {
+        left: _getEyeMetrics(results, orientation, EYE_TYPE_LEFT),
+        right: _getEyeMetrics(results, orientation, EYE_TYPE_RIGHT)
+      };
+    }
+
+    /**
+     * Get the metrics for one particular eye from our holistic results.
+     * @param {HolisticResults} results
+     * @param {LookMetrics} orientation
+     * @param {enumEyeType} eyeType Either EYE_TYPE_LEFT or EYE_TYPE_RIGHT.
+     * @return {EyeMetrics}
+     */
+    function _getEyeMetrics(results, orientation, eyeType) {
+      // Get the landmark indices for the appropriate eye.
+      let eyeInds = INDS_EYE_LEFT;
+      let indTop = IND_EYE_LEFT_TOP;
+      let indBottom = IND_EYE_LEFT_BOTTOM;
+      let indOuter = IND_EYE_LEFT_OUTER;
+      let indInner = IND_EYE_LEFT_INNER;
+      let irisInds = INDS_IRIS_LEFT;
+
+      if (eyeType === EYE_TYPE_RIGHT) {
+        eyeInds = INDS_EYE_RIGHT;
+        indTop = IND_EYE_RIGHT_TOP;
+        indBottom = IND_EYE_RIGHT_BOTTOM;
+        indOuter = IND_EYE_RIGHT_OUTER;
+        indInner = IND_EYE_RIGHT_INNER;
+        irisInds = INDS_IRIS_RIGHT;
+      }
+
+      // draw points for eye.
+      _.each(eyeInds, i => {
+        let lm = results.faceLandmarks[i];
+        let pt = landmark2pt(lm);
+        drawPt(pt, '#008844', 2);
+      });
+      // TODO: Get orientation of iris.
+      let thetaX = 0;
+      let thetaY = 0;
+
+      // Draw iris.
+      let irisPt = avgPt(_.map(irisInds, i => {
+        let lm = results.faceLandmarks[i];
+        return landmark2pt(lm);
+      }));
+      drawPt(irisPt, '#0088FF');
+
+      // Check for blink.
+      let lmTop = results.faceLandmarks[indTop];
+      let lmBottom = results.faceLandmarks[indBottom];
+      let lmOuter = results.faceLandmarks[indOuter];
+      let lmInner = results.faceLandmarks[indInner];
+      let ptTop = landmark2pt(lmTop);
+      let ptBottom = landmark2pt(lmBottom);
+      let ptOuter = landmark2pt(lmOuter);
+      let ptInner = landmark2pt(lmInner);
+      drawPt(ptTop, '#8800FF', 2);
+      drawPt(ptBottom, '#88FFFF', 2);
+      drawPt(ptOuter, '#0088FF', 2);
+      drawPt(ptInner, '#FF88FF', 2);
+
+      let dx = vec4.dist(ptOuter, ptInner);
+      let dy = vec4.dist(ptTop, ptBottom);
+      let eyeRatio = dy / dx;
+
+      // TODO: Compute eyebrow expression.
+
+      return {
+        openness: Math.min(eyeRatio * (3/2), 1.0),
+        isBlinking: (eyeRatio < 0.2),
+        iris: {thetaX, thetaY},
+        expression: 'neutral'
+      };
+    }
+
+    /**
+     * Get VTuber puppeteering metrics for our mouth from our holistic results.
+     * @param {HolisticResults} results
+     * @param {LookMetrics} orientation
+     * @return {MouthMetrics}
+     */
+    function getMouthMetrics(results, orientation) {
+      // draw points for lips.
+      _.each(INDS_LIPS, i => {
+        let lm = results.faceLandmarks[i];
+        let pt = landmark2pt(lm);
+        drawPt(pt, '#880000', 2);
+      });
+
+      // Get the current mouth shape.
+      let lmMLeft = results.faceLandmarks[IND_MOUTH_LEFT];
+      let lmMRight = results.faceLandmarks[IND_MOUTH_RIGHT];
+      let lmMTop = results.faceLandmarks[IND_MOUTH_TOP];
+      let lmMBottom = results.faceLandmarks[IND_MOUTH_BOTTOM];
+
+      let ptMLeft = landmark2pt(lmMLeft);
+      let ptMRight = landmark2pt(lmMRight);
+      let ptMTop = landmark2pt(lmMTop);
+      let ptMBottom = landmark2pt(lmMBottom);
+
+      // Do some math with the mouth points to figure out how wide the
+      // mouth is opened and if it's smiling, frowning, or neutral.
+      let mouthDX = vec4.dist(ptMLeft, ptMRight);
+      let mouthDY = vec4.dist(ptMTop, ptMBottom);
+      let ptMCenter = vec4.lerp([], ptMLeft, ptMRight, 0.5);
+      let uMouth = vec3.normalize([], vec3.sub([], ptMRight, ptMLeft));
+      let vMouth = vec3.sub([], ptMBottom, ptMCenter);
+      let nMouth = vec3.cross([], uMouth, orientation.look);
+      let vnMouthDot = vec3.dot(vMouth, nMouth);
+
+      // Compute the expression.
+      let mouthRatio = mouthDY/mouthDX;
+      let expression;
+      let faceExprSpan = document.querySelector('.faceExpr');
+      if (mouthRatio >= 0.8) {
+        faceExprSpan.innerHTML = '😮';
+        expression = ':O';
+      }
+      else if (mouthRatio >= 0.4) {
+        if (vnMouthDot >= 0.02) {
+          faceExprSpan.innerHTML = '😀';
+          expression = ':DD';
+        }
+        else {
+          faceExprSpan.innerHTML = '😦';
+          expression = 'DD:';
+        }
+      }
+      else if (mouthRatio >= 0.1) {
+        if (vnMouthDot >= 0.02) {
+          faceExprSpan.innerHTML = '😁';
+          expression = ':D';
+        }
+        else {
+          faceExprSpan.innerHTML = '😬';
+          expression = 'D:';
+        }
+      }
+      else {
+        if (vnMouthDot >= 0.01) {
+          faceExprSpan.innerHTML = '🙂';
+          expression = ':)';
+        }
+        else if (vnMouthDot >= 0.0) {
+          faceExprSpan.innerHTML = '😐';
+          expression = ':|';
+        }
+        else {
+          faceExprSpan.innerHTML = '🙁';
+          expression = ':(';
+        }
+      }
+
+      return {
+        expression,
+        openness: Math.min(mouthRatio, 1.0)
+      }
+    }
+
+    /**
+     * Get the global 2D tilt angles for the VTuber's body and other parts
+     * from our holistic results. By global, I mean that the angles are relative
+     * to the positive X axis rather than to their parent bone.
+     * @param {HolisticResults} results
+     * @return {number}
+     */
+    function getBoneAngles(results) {
+      // Body
+      let lmShoulderLeft = results.poseLandmarks[IND_SHOULDER_LEFT];
+      let ptShoulderLeft = landmark2pt(lmShoulderLeft);
+      let lmShoulderRight = results.poseLandmarks[IND_SHOULDER_RIGHT];
+      let ptShoulderRight = landmark2pt(lmShoulderRight);
+      drawLine(ptShoulderLeft, ptShoulderRight, '#888888', 2);
+      drawPt(ptShoulderLeft, '#00FF44', 4);
+      drawPt(ptShoulderRight, '#0044FF', 4);
+
+      let uShoulder = vec3.sub([], ptShoulderRight, ptShoulderLeft);
+      let bTilt = vecAngle(uShoulder);
+      let bodyTiltDiv = document.querySelector('.bodyTilt');
+      bodyTiltDiv.innerHTML = `Body tilt: ${Math.round(bTilt)}`;
+
+      // Head
+      let lmEarLeft = results.poseLandmarks[IND_EAR_LEFT];
+      let lmEarRight = results.poseLandmarks[IND_EAR_RIGHT];
+      let ptEarLeft = landmark2pt(lmEarLeft);
+      let ptEarRight = landmark2pt(lmEarRight);
+      let uHead = vec3.sub([], ptEarRight, ptEarLeft);
+      let hTilt = vecAngle(uHead);
+
+      // Left arm.
+      let lmElbowLeft = results.poseLandmarks[IND_ELBOW_LEFT];
+      let lmWristLeft = results.poseLandmarks[IND_WRIST_LEFT];
+      let lmIndexLeft = results.poseLandmarks[IND_INDEX_LEFT];
+      let lmPinkyLeft = results.poseLandmarks[IND_PINKY_LEFT];
+
+      let ptElbowLeft = landmark2pt(lmElbowLeft);
+      let ptWristLeft = landmark2pt(lmWristLeft);
+      let ptIndexLeft = landmark2pt(lmIndexLeft);
+      let ptPinkyLeft = landmark2pt(lmPinkyLeft);
+      let ptHandLeft = vec4.lerp([], ptIndexLeft, ptPinkyLeft, 0.5);
+
+      drawLine(ptElbowLeft, ptWristLeft, '#004422', 2);
+      drawPt(ptElbowLeft, '#008844', 4);
+      drawPt(ptWristLeft, '#00FF88', 8);
+
+      let uArmLeft = vec3.sub([], ptElbowLeft, ptShoulderLeft);
+      let uElbowLeft = vec3.sub([], ptWristLeft, ptElbowLeft);
+      let uWristLeft = vec3.sub([], ptHandLeft, ptWristLeft);
+
+      let alTilt = vecAngle(uArmLeft);
+      let elTilt = vecAngle(uElbowLeft);
+      let wlTilt = vecAngle(uWristLeft);
+
+      // Right arm.
+      let lmElbowRight = results.poseLandmarks[IND_ELBOW_RIGHT];
+      let lmWristRight = results.poseLandmarks[IND_WRIST_RIGHT];
+      let lmIndexRight = results.poseLandmarks[IND_INDEX_RIGHT];
+      let lmPinkyRight = results.poseLandmarks[IND_PINKY_RIGHT];
+
+      let ptElbowRight = landmark2pt(lmElbowRight);
+      let ptWristRight = landmark2pt(lmWristRight);
+      let ptIndexRight = landmark2pt(lmIndexRight);
+      let ptPinkyRight = landmark2pt(lmPinkyRight);
+      let ptHandRight = vec4.lerp([], ptIndexRight, ptPinkyRight, 0.5);
+
+      drawLine(ptElbowRight, ptWristRight, '#002244', 2);
+      drawPt(ptElbowRight, '#004488', 4);
+      drawPt(ptWristRight, '#0088FF', 8);
+
+      let uArmRight = vec3.sub([], ptElbowRight, ptShoulderRight);
+      let uElbowRight = vec3.sub([], ptWristRight, ptElbowRight);
+      let uWristRight = vec3.sub([], ptHandRight, ptWristRight);
+
+      let arTilt = vecAngle(uArmRight);
+      let erTilt = vecAngle(uElbowRight);
+      let wrTilt = vecAngle(uWristRight);
+
+      return {
+        body: bTilt,
+        head: hTilt,
+
+        armLeft: alTilt,
+        elbowLeft: elTilt,
+        wristLeft: wlTilt,
+
+        armRight: arTilt,
+        elbowRight: erTilt,
+        wristRight: wrTilt
+      };
+    }
+
+    const HAND_TYPE_LEFT = 0;
+    const HAND_TYPE_RIGHT = 1;
+
+    /**
+     * Get VTuber metrics for a hand from its hand landmark results.
+     * @param {HandLandmarks} handLms
+     * @return {bitmask} The result is a bitmask which tells us which fingers
+     *   on the hand are extended. When a bit is 1, that finger is extended.
+     *   Bit 1: thumb
+     *   Bit 2: index
+     *   Bit 3: middle
+     *   Bit 4: ring
+     *   Bit 5: pinky
+     */
+    function getHandMetrics(handLms, type) {
+      let lmWrist = handLms[IND_HAND_WRIST];
+      let ptWrist = landmark2pt(lmWrist);
+
+      // Figure out whether each finger is extended.
+      let thumbExt = isthumbExtended(handLms);
+      let indexExt = isFingerExtended(handLms, ptWrist, IND_HAND_INDEX_START, IND_HAND_INDEX_END);
+      let middleExt = isFingerExtended(handLms, ptWrist, IND_HAND_MIDDLE_START, IND_HAND_MIDDLE_END);
+      let ringExt = isFingerExtended(handLms, ptWrist, IND_HAND_RING_START, IND_HAND_RING_END);
+      let pinkyExt = isFingerExtended(handLms, ptWrist, IND_HAND_PINKY_START, IND_HAND_PINKY_END);
+
+      let u;
+      if (type === HAND_TYPE_LEFT)
+        u = vec3.normalize([], landmarkVector(handLms, IND_HAND_PINKY_BASE, IND_HAND_INDEX_BASE));
+      else
+        u = vec3.normalize([], landmarkVector(handLms, IND_HAND_INDEX_BASE, IND_HAND_PINKY_BASE));
+      let v = vec3.normalize([], landmarkVector(handLms, IND_HAND_WRIST, IND_HAND_MIDDLE_BASE));
+      let n = vec3.cross([], u, v);
+      console.log(n);
+
+      return {
+        fingers: (thumbExt ? 1 : 0) + (indexExt ? 2 : 0) + (middleExt ? 4 : 0) + (ringExt ? 8 : 0) + (pinkyExt ? 16 : 0),
+        palmNormal: n,
+        palmForward: vec3.dot(n, [0, 0, -1]) > 0.5,
+        palmBackward: vec3.dot(n, [0, 0, 1]) > 0.5
+      };
+    }
+
+    /**
+     * Check if a VTuber's finger is extended based on the hand landmarks.
+     * @param {HandLandmarks} handLms
+     * @param {vec4} ptWrist
+     * @param {uint} ind1 The landmark index for for base of the finger.
+     * @param {uint} ind2 The landmark index for the tip of the finger.
+     * @return {boolean} true iff the finger is extended.
+     */
+    function isFingerExtended(handLms, ptWrist, ind1, ind2) {
+      let lm1 = handLms[ind1];
+      let lm2 = handLms[ind2];
+      let pt1 = landmark2pt(lm1);
+      let pt2 = landmark2pt(lm2);
+      let u1 = vec3.sub([], pt1, ptWrist);
+      let u2 = vec3.sub([], pt2, pt1);
+      return vec3.dot(u1, u2) >= 0;
+    }
+
+    /**
+     * Get the vector from one landmark to another.
+     * @param {Landmark[]} lms
+     * @param {uint} ind1 Index of the start landmark.
+     * @param {uint} ind2 Index of the end landmark.
+     * @return {vec3}
+     */
+    function landmarkVector(lms, ind1, ind2) {
+      let lm1 = lms[ind1];
+      let lm2 = lms[ind2];
+      let pt1 = landmark2pt(lm1);
+      let pt2 = landmark2pt(lm2);
+      return vec3.sub([], pt2, pt1);
+    }
+
+    /**
+     * Check if a VTuber's finger is extended based on the hand landmarks.
+     * @param {HandLandmarks} handLms
+     * @return {boolean} true iff the finger is extended.
+     */
+    function isthumbExtended(handLms) {
+      let lm1 = handLms[IND_HAND_PINKY_BASE];
+      let lm2 = handLms[IND_HAND_THUMB_START];
+      let lm3 = handLms[IND_HAND_THUMB_END];
+      let pt1 = landmark2pt(lm1);
+      let pt2 = landmark2pt(lm2);
+      let pt3 = landmark2pt(lm3);
+      let u1 = vec3.normalize([], vec3.sub([], pt2, pt1));
+      let u2 = vec3.normalize([], vec3.sub([], pt3, pt2));
+      return vec3.dot(u1, u2) >= 0.6;
+    }
+
+    /**
+     * Get an emoji corresponding to a particular hand bitmask. (for debugging)
+     * @param {bitmask} handBitmask
+     * @return {string}
+     */
+    function getHandEmoji(handMetrics) {
+      if (handMetrics.fingers === 0b00001)
+        if (handMetrics.palmForward)
+          return '👎';
+        else
+          return '👍';
+      else if (handMetrics.fingers === 0b00010)
+        if (handMetrics.palmForward)
+          return '☝';
+        else
+          return '👈';
+      else if (handMetrics.fingers === 0b00011)
+        return '🔫';
+      else if (handMetrics.fingers === 0b00100)
+        return '🖕';
+      else if (handMetrics.fingers === 0b00110)
+        return '✌';
+      else if (handMetrics.fingers === 0b01110)
+        return '3';
+      else if (handMetrics.fingers === 0b11100)
+        return '👌';
+      else if (handMetrics.fingers === 0b10011)
+        return '🤟';
+      else if (handMetrics.fingers === 0b10010)
+        return '🤘';
+      else if (handMetrics.fingers === 0b10001)
+        return '🤙';
+      else if (handMetrics.fingers === 0b11110)
+        return '4';
+      else if (handMetrics.fingers === 0b10000)
+        return '🧐';
+      else if (handMetrics.fingers === 0b00000)
+        return '🤛';
+      else if (handMetrics.fingers === 0b11111)
+        return '✋';
+      else
+        return handMetrics.fingers.toString(2).padStart(5, '0');
+    }
+
+    function onResults(results) {
+      lastResults = results;
+      try {
+        canvasCtx.save();
+        canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+        // Flip the landmarks horizontally.
+        _.each(results.poseLandmarks, flipLandmark);
+        _.each(results.faceLandmarks, flipLandmark);
+        _.each(results.leftHandLandmarks, flipLandmark);
+        _.each(results.rightHandLandmarks, flipLandmark);
+
+        // Face, body, and hand tracking info for our VTuber puppetry.
+        let puppetryData = {};
+
+        if (results.faceLandmarks) {
+          let orientation = getFaceOrientation(results);
+          let eyes = getEyeMetrics(results, orientation);
+          let mouth = getMouthMetrics(results, orientation);
+
+          puppetryData.face = {orientation, eyes, mouth};
+        }
+        if (results.poseLandmarks) {
+          puppetryData.bones = getBoneAngles(results);
+        }
+
+        // TODO: hand metrics
+        if (results.leftHandLandmarks) {
+          let leftMetrics = getHandMetrics(results.leftHandLandmarks, HAND_TYPE_LEFT);
+          puppetryData.handLeft = leftMetrics;
+          let leftSpan = document.querySelector('.leftHandExpr');
+          leftSpan.innerHTML = getHandEmoji(leftMetrics);
+        }
+
+        if (results.rightHandLandmarks) {
+          let rightMetrics = getHandMetrics(results.rightHandLandmarks, HAND_TYPE_RIGHT);
+          puppetryData.handRight = rightMetrics;
+          let rightSpan = document.querySelector('.rightHandExpr');
+          rightSpan.innerHTML = getHandEmoji(rightMetrics);
+        }
+
+        // TODO: Send the puppetry data to our server.
+
+        // Draw the landmarks.
+        canvasCtx.globalCompositeOperation = 'source-over';
+        //drawConnectors(canvasCtx, results.poseLandmarks, POSE_CONNECTIONS, {color: '#00FF00', lineWidth: 4});
+        //drawLandmarks(canvasCtx, results.poseLandmarks, {color: '#FF0000', lineWidth: 2});
+        drawConnectors(canvasCtx, results.faceLandmarks, FACEMESH_TESSELATION, {color: '#C0C0C070', lineWidth: 1});
+        drawConnectors(canvasCtx, results.leftHandLandmarks, HAND_CONNECTIONS, {color: '#CC0000', lineWidth: 5});
+        drawLandmarks(canvasCtx, results.leftHandLandmarks, {color: '#00FF00', lineWidth: 2});
+        drawConnectors(canvasCtx, results.rightHandLandmarks, HAND_CONNECTIONS, {color: '#00CC00', lineWidth: 5});
+        drawLandmarks(canvasCtx, results.rightHandLandmarks, {color: '#FF0000', lineWidth: 2});
+        canvasCtx.restore();
+      }
+      catch (err) {
+        console.error(err);
+      }
+    }
+
+    const holistic = new Holistic({locateFile: (file) => {
+      return `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`;
+    }});
+    holistic.setOptions({
+      modelComplexity: 1,
+      smoothLandmarks: true,
+      enableSegmentation: false,
+      smoothSegmentation: false,
+      refineFaceLandmarks: true,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5
+    });
+    holistic.onResults(onResults);
+
+    const camera = new Camera(videoElement, {
+      onFrame: async () => {
+        await holistic.send({image: videoElement});
+      },
+      width: 1280,
+      height: 720
+    });
+    camera.start();
+
+    setInterval(() => {
+      //console.log(lastResults);
+    }, 1000);
+  </script>
+</head>
+
+<body>
+  <div class="container">
+    <video class="input_video" style="display: none;"></video>
+    <canvas class="output_canvas" width="1280px" height="720px"></canvas>
+    <div class="expressionsDebug" style="font-size: 2em;">
+      Expression:
+      <span class="leftHandExpr">?</span>
+      <span class="faceExpr">?</span>
+      <span class="rightHandExpr">?</span>
+    </div>
+    <div class='bodyTilt'>Body tilt: ?</div>
+  </div>
+</body>
+</html>
