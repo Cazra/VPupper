@@ -18,6 +18,7 @@
 
     // Keep track of the last set of results for debugging.
     var lastResults;
+    var lastOutput;
 
     // Indices for important face landmarks, reverse engineered from MediaPipe's `holistic.js` code.
     // Not sure why they don't bother to document any of this! >:(
@@ -61,6 +62,14 @@
     const IND_MOUTH_RIGHT = 78;
     const IND_MOUTH_TOP = 13;
     const IND_MOUTH_BOTTOM = 14;
+
+    const IND_BROW_LEFT_OUTER = 300;
+    const IND_BROW_LEFT_MIDDLE = 334;
+    const IND_BROW_LEFT_INNER = 336;
+
+    const IND_BROW_RIGHT_OUTER = 70;
+    const IND_BROW_RIGHT_MIDDLE = 105;
+    const IND_BROW_RIGHT_INNER = 107;
 
     // Indices for cardinal landmarks on the face.
     const IND_FACE_RIGHT = 234;
@@ -228,6 +237,9 @@
       let indOuter = IND_EYE_LEFT_OUTER;
       let indInner = IND_EYE_LEFT_INNER;
       let irisInds = INDS_IRIS_LEFT;
+      let indBrowOut = IND_BROW_LEFT_OUTER;
+      let indBrowMid = IND_BROW_LEFT_MIDDLE;
+      let indBrowIn = IND_BROW_LEFT_INNER;
 
       if (eyeType === EYE_TYPE_RIGHT) {
         eyeInds = INDS_EYE_RIGHT;
@@ -236,24 +248,24 @@
         indOuter = IND_EYE_RIGHT_OUTER;
         indInner = IND_EYE_RIGHT_INNER;
         irisInds = INDS_IRIS_RIGHT;
+        indBrowOut = IND_BROW_RIGHT_OUTER;
+        indBrowMid = IND_BROW_RIGHT_MIDDLE;
+        indBrowIn = IND_BROW_RIGHT_INNER;
       }
 
       // draw points for eye.
       _.each(eyeInds, i => {
         let lm = results.faceLandmarks[i];
         let pt = landmark2pt(lm);
-        drawPt(pt, '#008844', 2);
+        drawPt(pt, '#008844', 1);
       });
-      // TODO: Get orientation of iris.
-      let thetaX = 0;
-      let thetaY = 0;
 
       // Draw iris.
-      let irisPt = avgPt(_.map(irisInds, i => {
+      let ptIris = avgPt(_.map(irisInds, i => {
         let lm = results.faceLandmarks[i];
         return landmark2pt(lm);
       }));
-      drawPt(irisPt, '#0088FF');
+      drawPt(ptIris, '#0088FF');
 
       // Check for blink.
       let lmTop = results.faceLandmarks[indTop];
@@ -269,17 +281,47 @@
       drawPt(ptOuter, '#0088FF', 2);
       drawPt(ptInner, '#FF88FF', 2);
 
+      // Compute openness of eye.
       let dx = vec4.dist(ptOuter, ptInner);
       let dy = vec4.dist(ptTop, ptBottom);
       let eyeRatio = dy / dx;
 
+      // Get orientation of iris. (The iris is really jittery, so this probably won't be useful for actual puppetry data)
+      let u, v;
+      if (eyeType = EYE_TYPE_LEFT) {
+        u = vec3.sub([], ptInner, ptOuter);
+        v = vec3.sub([], ptIris, ptOuter);
+      }
+      else {
+        u = vec3.sub([], ptOuter, ptInner);
+        v = vec3.sub([], ptIris, ptInner);
+      }
+      let w = vec3.sub([], ptTop, ptBottom);
+
+      let uLen = vec3.length(u);
+      let vLen = vec3.length(v);
+      let wLen = vec3.length(w);
+
+      let alpha = vec3.dot(u, v) / (uLen * uLen);
+      let beta = vec3.dot(w, v) / (wLen * wLen);
+
+      let thetaX = vecAngle([1, beta - 0.5, 0]);
+      let thetaY = vecAngle([1, alpha - 0.5, 0]);
+
       // TODO: Compute eyebrow expression.
+      let lmBrowOut = results.faceLandmarks[indBrowOut];
+      let lmBrowMid = results.faceLandmarks[indBrowMid];
+      let lmBrowIn = results.faceLandmarks[indBrowIn];
+      let ptBrowOut = landmark2pt(lmBrowOut);
+      let ptBrowMid = landmark2pt(lmBrowMid);
+      let ptBrowIn = landmark2pt(lmBrowIn);
+      drawPt(ptBrowOut, '#FF8888', 2);
+      drawPt(ptBrowMid, '#88FF88', 2);
+      drawPt(ptBrowIn, '#8888FF', 2);
 
       return {
         openness: Math.min(eyeRatio * (3/2), 1.0),
-        isBlinking: (eyeRatio < 0.2),
-        iris: {thetaX, thetaY},
-        expression: 'neutral'
+        iris: {thetaX, thetaY}
       };
     }
 
@@ -314,55 +356,47 @@
       let mouthDY = vec4.dist(ptMTop, ptMBottom);
       let ptMCenter = vec4.lerp([], ptMLeft, ptMRight, 0.5);
       let uMouth = vec3.normalize([], vec3.sub([], ptMRight, ptMLeft));
-      let vMouth = vec3.sub([], ptMBottom, ptMCenter);
+      let vMouth = vec3.normalize ([], vec3.sub([], ptMBottom, ptMCenter));
       let nMouth = vec3.cross([], uMouth, orientation.look);
-      let vnMouthDot = vec3.dot(vMouth, nMouth);
 
-      // Compute the expression.
+      let vnMouthDot = vec3.dot(vMouth, nMouth);
       let mouthRatio = mouthDY/mouthDX;
-      let expression;
+
+      // Debug expression w/ emojis.
       let faceExprSpan = document.querySelector('.faceExpr');
       if (mouthRatio >= 0.8) {
         faceExprSpan.innerHTML = '😮';
-        expression = ':O';
       }
       else if (mouthRatio >= 0.4) {
-        if (vnMouthDot >= 0.02) {
+        if (vnMouthDot >= 0) {
           faceExprSpan.innerHTML = '😀';
-          expression = ':DD';
         }
         else {
           faceExprSpan.innerHTML = '😦';
-          expression = 'DD:';
         }
       }
       else if (mouthRatio >= 0.1) {
-        if (vnMouthDot >= 0.02) {
+        if (vnMouthDot >= 0) {
           faceExprSpan.innerHTML = '😁';
-          expression = ':D';
         }
         else {
           faceExprSpan.innerHTML = '😬';
-          expression = 'D:';
         }
       }
       else {
-        if (vnMouthDot >= 0.01) {
+        if (vnMouthDot >= 0.1) {
           faceExprSpan.innerHTML = '🙂';
-          expression = ':)';
         }
-        else if (vnMouthDot >= 0.0) {
+        else if (vnMouthDot >= -0.25) {
           faceExprSpan.innerHTML = '😐';
-          expression = ':|';
         }
         else {
           faceExprSpan.innerHTML = '🙁';
-          expression = ':(';
         }
       }
 
       return {
-        expression,
+        smileness: vnMouthDot,
         openness: Math.min(mouthRatio, 1.0)
       }
     }
@@ -491,13 +525,10 @@
         u = vec3.normalize([], landmarkVector(handLms, IND_HAND_INDEX_BASE, IND_HAND_PINKY_BASE));
       let v = vec3.normalize([], landmarkVector(handLms, IND_HAND_WRIST, IND_HAND_MIDDLE_BASE));
       let n = vec3.cross([], u, v);
-      console.log(n);
 
       return {
         fingers: (thumbExt ? 1 : 0) + (indexExt ? 2 : 0) + (middleExt ? 4 : 0) + (ringExt ? 8 : 0) + (pinkyExt ? 16 : 0),
-        palmNormal: n,
-        palmForward: vec3.dot(n, [0, 0, -1]) > 0.5,
-        palmBackward: vec3.dot(n, [0, 0, 1]) > 0.5
+        roll: vec3.dot(n, [0, 0, -1])
       };
     }
 
@@ -558,12 +589,12 @@
      */
     function getHandEmoji(handMetrics) {
       if (handMetrics.fingers === 0b00001)
-        if (handMetrics.palmForward)
+        if (handMetrics.roll > 0.5)
           return '👎';
         else
           return '👍';
       else if (handMetrics.fingers === 0b00010)
-        if (handMetrics.palmForward)
+        if (handMetrics.roll > 0.5)
           return '☝';
         else
           return '👈';
@@ -636,7 +667,13 @@
           rightSpan.innerHTML = getHandEmoji(rightMetrics);
         }
 
+        lastOutput = puppetryData;
+
         // TODO: Send the puppetry data to our server.
+        let xhr = new XMLHttpRequest();
+        xhr.open('POST', '../puppet-data');
+        xhr.setRequestHeader('Content-Type', 'application/json;charset=UTF-8');
+        xhr.send(JSON.stringify(puppetryData));
 
         // Draw the landmarks.
         canvasCtx.globalCompositeOperation = 'source-over';
@@ -677,9 +714,11 @@
     });
     camera.start();
 
-    setInterval(() => {
-      //console.log(lastResults);
-    }, 1000);
+    // Setup the JSON debugging button.
+    let btnSnapshot = document.querySelector('.btnSnapshot');
+    btnSnapshot.onclick = () => {
+      console.log(lastResults, lastOutput);
+    };
   </script>
 </head>
 
@@ -694,6 +733,7 @@
       <span class="rightHandExpr">?</span>
     </div>
     <div class='bodyTilt'>Body tilt: ?</div>
+    <div><button class='btnSnapshot'>JSON snapshot</button>
   </div>
 </body>
 </html>
