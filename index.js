@@ -56,13 +56,23 @@ const DEFAULT_DATA = {
   // Y+ points downwards)
   "bones": {
     "body": 0,
+    "uBody": [1, 0, 0],
     "head": 0,
+    "uHead": [1, 0, 0],
+
     "armLeft": 110,
+    "uArmLeft": [-0.2, 1, 0],
     "elbowLeft": -180,
+    "uElbowLeft": [-1, 0, 0],
     "wristLeft": -180,
+    "uWristLeft": [-1, 0, 0],
+
     "armRight": 70,
+    "uArmRight": [0.2, 1, 0],
     "elbowRight": 0,
-    "wristRight": 0
+    "uElbowRight": [1, 0, 0],
+    "wristRight": 0,
+    "uWristRight": [1, 0, 0]
   },
 
   // Hands puppetry
@@ -119,85 +129,7 @@ function getFramesAvgVec3(path) {
   ]
 }
 
-/**
- * Using our last captured frames, compute a smoothed frame to reduce jitteryness.
- * @return {PuppetData}
- */
-function getSmoothedFrame(newData) {
-  return {
-    "face": {
-      "orientation": {
-        "look": getFramesAvgVec3(['face', 'orientation', 'look']),
-        "up": getFramesAvgVec3(['face', 'orientation', 'up']),
-        "right": getFramesAvgVec3(['face', 'orientation', 'right'])
-      },
-      "eyes": {
-        "left": {
-          // Blinks are too fast, so don't smooth eye openness.
-          "openness": getFramesAvg(['face', 'eyes', 'left', 'openness']),
-          "blink": (newData.face.eyes.left.openness < 0.3),
-          "iris": {
-            "thetaX": getFramesAvg(['face', 'eyes', 'left', 'iris', 'thetaX']),
-            "thetaY": getFramesAvg(['face', 'eyes', 'left', 'iris', 'thetaY'])
-          }
-        },
-        "right": {
-          // Blinks are too fast, so don't smooth eye openness.
-          "openness": getFramesAvg(['face', 'eyes', 'right', 'openness']),
-          "blink": (newData.face.eyes.right.openness < 0.3),
-          "iris": {
-            "thetaX": getFramesAvg(['face', 'eyes', 'right', 'iris', 'thetaX']),
-            "thetaY": getFramesAvg(['face', 'eyes', 'right', 'iris', 'thetaY'])
-          }
-        }
-      },
-      "mouth": {
-        "smileness": getFramesAvg(['face', 'mouth', 'smileness']),
-        "openness": getFramesAvg(['face', 'mouth', 'openness'])
-      }
-    },
-    "bones": {
-      "body": getFramesAvg(['bones', 'body']),
-      "head": getFramesAvg(['bones', 'head']),
-      "armLeft": getFramesAvg(['bones', 'armLeft']),
-      "elbowLeft": getFramesAvg(['bones', 'elbowLeft']),
-      "wristLeft": getFramesAvg(['bones', 'wristLeft']),
-      "armRight": getFramesAvg(['bones', 'armRight']),
-      "elbowRight": getFramesAvg(['bones', 'elbowRight']),
-      "wristRight": getFramesAvg(['bones', 'wristRight'])
-    },
-    "handLeft": {
-      // Finger state is discrete data, so we don't smooth it.
-      "fingers": newData.handLeft.fingers,
-      "roll": getFramesAvg(['handLeft', 'roll'])
-    },
-    "handRight": {
-      // Finger state is discrete data, so we don't smooth it.
-      "fingers": newData.handRight.fingers,
-      "roll": getFramesAvg(['handRight', 'roll'])
-    },
-  };
-}
-
-const MAX_FRAMES = 4;
-let lastFrames = [DEFAULT_DATA];
-let smoothedResults = DEFAULT_DATA;
-
-// Setup the routes, middleware, etc. for our server.
-let app = express();
-app.use(favicon('./favicon.ico'));
-app.use('/static', express.static('static'));
-app.use(express.json());
-
-// Publish new puppetry data to this server.
-app.post('/puppet-data', (req, res) => {
-  console.log('Updating puppet data.', req.body);
-  let newData = req.body;
-  let lastData = lastFrames.slice(-1)[0];
-  lastFrames.push(newData);
-  if (lastFrames.length > MAX_FRAMES)
-    lastFrames = lastFrames.slice(1, MAX_FRAMES + 1);
-
+function massageData(newData, lastData) {
   // Fill in any missing data with whatever we have from our last frame.
   if (!newData.bones)
     newData.bones = lastData.bones;
@@ -208,13 +140,34 @@ app.post('/puppet-data', (req, res) => {
   if (!newData.handRight)
     newData.handRight = lastData.handRight;
 
+  // Massage the data with some additional properties for our end Client.
+  newData.face.eyes.left.blink = (newData.face.eyes.left.openness < 0.4);
+  newData.face.eyes.right.blink = (newData.face.eyes.right.openness < 0.4);
+}
+
+let newData = DEFAULT_DATA;
+
+// Setup the routes, middleware, etc. for our server.
+let app = express();
+app.use(favicon('./favicon.ico'));
+app.use('/static', express.static('static'));
+app.use(express.json());
+
+// Publish new puppetry data to this server.
+app.post('/puppet-data', (req, res) => {
+  console.log('Updating puppet data.', req.body);
+
+  let lastData = newData;
+  newData = req.body;
+
+  massageData(newData, lastData);
+
   // Smooth out the data with the average of our frames.
-  smoothedResults = getSmoothedFrame(newData);
   res.json('ok');
 });
 app.get('/puppet-data', (req, res) => {
-  console.log('Fetching smoothed puppet data.');
-  res.json(smoothedResults);
+  console.log('Fetching latest puppet data.');
+  res.json(newData);
 });
 
 // Start the server.

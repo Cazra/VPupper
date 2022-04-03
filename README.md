@@ -89,18 +89,28 @@ The puppeteering data looks something like this:
     }
   },
 
-  // Global angles (in degrees) for the bones around the negative Z axis.
+  // Global angles (in degrees) for the bones and their directional vectors.
   // (assumes angle increase clockwise, like if we use atan2 in a sytem where
   // Y+ points downwards)
   "bones": {
     "body": 0,
+    "uBody": [1, 0, 0],
     "head": 0,
+    "uHead": [1, 0, 0],
+
     "armLeft": 110,
+    "uArmLeft": [-0.2, 1, 0],
     "elbowLeft": -180,
+    "uElbowLeft": [-1, 0, 0],
     "wristLeft": -180,
+    "uWristLeft": [-1, 0, 0],
+
     "armRight": 70,
+    "uArmRight": [0.2, 1, 0],
     "elbowRight": 0,
-    "wristRight": 0
+    "uElbowRight": [1, 0, 0],
+    "wristRight": 0,
+    "uWristRight": [1, 0, 0]
   },
 
   // Hands puppetry
@@ -122,6 +132,9 @@ The puppeteering data looks something like this:
   },
 }
 ```
+
+Make note that the coordinate system used assumes that X increases to the right,
+Y increases downwards, and Z increases into the screen (away from the user).
 
 # Avatar Client
 This is a 3rd party client application (presumably written by you), which

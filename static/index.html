@@ -484,15 +484,24 @@
 
       return {
         body: bTilt,
+        vBody: uShoulder,
+
         head: hTilt,
+        vHead: uHead,
 
         armLeft: alTilt,
+        uArmLeft,
         elbowLeft: elTilt,
+        uElbowLeft,
         wristLeft: wlTilt,
+        uWristLeft,
 
         armRight: arTilt,
+        uArmRight,
         elbowRight: erTilt,
-        wristRight: wrTilt
+        uElbowRight,
+        wristRight: wrTilt,
+        uWristRight
       };
     }
 
@@ -655,7 +664,6 @@
           puppetryData.bones = getBoneAngles(results);
         }
 
-        // TODO: hand metrics
         if (results.leftHandLandmarks) {
           let leftMetrics = getHandMetrics(results.leftHandLandmarks, HAND_TYPE_LEFT);
           puppetryData.handLeft = leftMetrics;
@@ -672,7 +680,7 @@
 
         lastOutput = puppetryData;
 
-        // TODO: Send the puppetry data to our server.
+        // Send the puppetry data to our server.
         let xhr = new XMLHttpRequest();
         xhr.open('POST', '../puppet-data');
         xhr.setRequestHeader('Content-Type', 'application/json;charset=UTF-8');
