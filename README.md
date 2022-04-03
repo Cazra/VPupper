@@ -50,6 +50,9 @@ The puppeteering data looks something like this:
         // How open is the eye? 1.0 = fully open, 0.0 = closed.
         "openness": 1.0,
 
+        // Whether this eye is currently blinking. (Blinking is too fast for the smoothed frames, so here we catch it as discrete data)
+        "blink": false,
+
         // Iris orientation data.
         "iris": {
 
@@ -63,6 +66,7 @@ The puppeteering data looks something like this:
 
       "right": {
         "openness": 1.0,
+        "blink": false,
         "iris": {
           "thetaX": 0,
           "thetaY": 0
@@ -121,5 +125,5 @@ The puppeteering data looks something like this:
 
 # Avatar Client
 This is a 3rd party client application (presumably written by you), which
-gets the latest smoothed puppeteering data from the VPupper server and uses it 
+gets the latest smoothed puppeteering data from the VPupper server and uses it
 to rig and animate a 2D VTuber avatar.

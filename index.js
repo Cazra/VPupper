@@ -2,6 +2,7 @@
 
 const _ = require('underscore');
 const express = require('express');
+const favicon = require('serve-favicon');
 
 let argv = process.argv.slice(1);
 if (argv.length < 2)
@@ -22,6 +23,7 @@ const DEFAULT_DATA = {
       "left": {
         // How open is the eye? 1.0 = fully open, 0.0 = closed.
         "openness": 1.0,
+        "blink": false,
         "iris": {
           // Rotation of the iris around the negative Y axis of the eye.
           "thetaX": 0,
@@ -31,6 +33,7 @@ const DEFAULT_DATA = {
       },
       "right": {
         "openness": 1.0,
+        "blink": false,
         "iris": {
           "thetaX": 0,
           "thetaY": 0
@@ -107,12 +110,12 @@ function getFramesAvgVec3(path) {
       memo[1] + v[1],
       memo[2] + v[2]
     ]
-  });
+  }, [0, 0, 0]);
 
   return [
     sumV[0]/lastFrames.length,
     sumV[1]/lastFrames.length,
-    sumV[1]/lastFrames.length
+    sumV[2]/lastFrames.length
   ]
 }
 
@@ -130,14 +133,18 @@ function getSmoothedFrame(newData) {
       },
       "eyes": {
         "left": {
+          // Blinks are too fast, so don't smooth eye openness.
           "openness": getFramesAvg(['face', 'eyes', 'left', 'openness']),
+          "blink": (newData.face.eyes.left.openness < 0.3),
           "iris": {
             "thetaX": getFramesAvg(['face', 'eyes', 'left', 'iris', 'thetaX']),
             "thetaY": getFramesAvg(['face', 'eyes', 'left', 'iris', 'thetaY'])
           }
         },
         "right": {
+          // Blinks are too fast, so don't smooth eye openness.
           "openness": getFramesAvg(['face', 'eyes', 'right', 'openness']),
+          "blink": (newData.face.eyes.right.openness < 0.3),
           "iris": {
             "thetaX": getFramesAvg(['face', 'eyes', 'right', 'iris', 'thetaX']),
             "thetaY": getFramesAvg(['face', 'eyes', 'right', 'iris', 'thetaY'])
@@ -160,10 +167,12 @@ function getSmoothedFrame(newData) {
       "wristRight": getFramesAvg(['bones', 'wristRight'])
     },
     "handLeft": {
+      // Finger state is discrete data, so we don't smooth it.
       "fingers": newData.handLeft.fingers,
       "roll": getFramesAvg(['handLeft', 'roll'])
     },
     "handRight": {
+      // Finger state is discrete data, so we don't smooth it.
       "fingers": newData.handRight.fingers,
       "roll": getFramesAvg(['handRight', 'roll'])
     },
@@ -176,6 +185,7 @@ let smoothedResults = DEFAULT_DATA;
 
 // Setup the routes, middleware, etc. for our server.
 let app = express();
+app.use(favicon('./favicon.ico'));
 app.use('/static', express.static('static'));
 app.use(express.json());
 
@@ -200,8 +210,6 @@ app.post('/puppet-data', (req, res) => {
 
   // Smooth out the data with the average of our frames.
   smoothedResults = getSmoothedFrame(newData);
-  console.log('Smoothed data: ', smoothedResults);
-
   res.json('ok');
 });
 app.get('/puppet-data', (req, res) => {
