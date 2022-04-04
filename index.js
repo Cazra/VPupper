@@ -130,6 +130,9 @@ function getFramesAvgVec3(path) {
 }
 
 function massageData(newData, lastData) {
+  newData.hasHandLeftData = !!newData.handLeft;
+  newData.hasHandRightData = !!newData.handRight;
+
   // Fill in any missing data with whatever we have from our last frame.
   if (!newData.bones)
     newData.bones = lastData.bones;
